@@ -96,6 +96,48 @@ try:
     ResponseTextDeltaEvent.__init__ = _patched_rtde_init
 except Exception:
     pass
+
+# ---------------------------------------------------------------------------
+# Monkey-patch #2 (the one that actually matters for streaming): before the
+# SDK ever builds a ResponseTextDeltaEvent, it accumulates the raw chat-
+# completions chunk into a plain `str` field via `+=`
+# (agents/models/chatcmpl_stream_handler.py: `state.text_content_index_and_
+# output[1].text += delta.content`). Since databricks-gpt-oss-120b's
+# `delta.content` is a list of parts (not a string), that `+=` raises
+# `TypeError: can only concatenate str (not "list") to str` and kills the
+# whole stream generator immediately - no ResponseTextDeltaEvent for the
+# rest of the turn ever reaches process_agent_stream_events, so the bubble
+# stays empty and the request errors out. This is upstream of everything
+# else in this file. Fix it at the source by coercing every chat-completion
+# chunk's delta fields to plain text before the SDK's stream handler sees
+# them.
+# ---------------------------------------------------------------------------
+try:
+    from agents.models.chatcmpl_stream_handler import ChatCmplStreamHandler
+
+    _orig_handle_stream = ChatCmplStreamHandler.handle_stream.__func__
+
+    async def _coerce_chatcmpl_chunks(stream):
+        async for chunk in stream:
+            for choice in getattr(chunk, "choices", None) or []:
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+                for field in ("content", "reasoning_content", "reasoning"):
+                    value = getattr(delta, field, None)
+                    if isinstance(value, list):
+                        setattr(delta, field, coerce_content_to_text(value))
+            yield chunk
+
+    async def _patched_handle_stream(cls, response, stream, *args, **kwargs):
+        async for event in _orig_handle_stream(
+            cls, response, _coerce_chatcmpl_chunks(stream), *args, **kwargs
+        ):
+            yield event
+
+    ChatCmplStreamHandler.handle_stream = classmethod(_patched_handle_stream)
+except Exception:
+    pass
 # ---------------------------------------------------------------------------
 
 

@@ -224,3 +224,6 @@ sketch
 **/.env
 **/.env.local
 load-test-runs/
+
+# Portable local CLI tools (not part of the project, machine-local)
+/tools/
