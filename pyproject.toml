@@ -16,6 +16,8 @@ dependencies = [
     "openai-agents>=0.4.1",
     "python-dotenv>=1.2.1",
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
+    "pypdf>=6.0.0",
+    "httpx>=0.28.0",
 ]
 
 [build-system]
@@ -26,6 +28,7 @@ build-backend = "hatchling.build"
 dev = [
     "hatchling>=1.28.0",
     "pytest>=9.0.2",
+    "reportlab>=4.0.0",
 ]
 
 setup = [

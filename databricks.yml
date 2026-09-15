@@ -29,6 +29,16 @@ resources:
           experiment:
             experiment_id: ""
             permission: 'CAN_MANAGE'
+        - name: 'travel_expense_mcp'
+          uc_securable:
+            securable_full_name: 'travel-expense-mcp-dev'
+            securable_type: 'CONNECTION'
+            permission: 'USE_CONNECTION'
+        - name: 'travel_expense_mcp_file_upload'
+          uc_securable:
+            securable_full_name: 'travel-expense-mcp-dev-file-upload'
+            securable_type: 'CONNECTION'
+            permission: 'USE_CONNECTION'
 
 targets:
   dev:

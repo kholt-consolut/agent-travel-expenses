@@ -15,8 +15,11 @@ from mlflow.types.responses import (
     ResponsesAgentStreamEvent,
 )
 
+from agent_server.attachment_processing import AttachmentProcessor
+from agent_server.document_extraction import PdfTextExtractor
 from agent_server.gpt_oss_compat import GptOssReasoningCompat
 from agent_server.history import normalize_history_items
+from agent_server.sap_file_upload import SapFileUploader
 from agent_server.utils import (
     build_mcp_url,
     get_user_workspace_client,
@@ -96,6 +99,11 @@ def create_agent(mcp_servers: List[MCPServer]) -> Agent:
     )
 
 
+def build_attachment_processor() -> AttachmentProcessor:
+    uploader = SapFileUploader.for_default_connection(get_user_workspace_client())
+    return AttachmentProcessor(PdfTextExtractor(), uploader)
+
+
 @invoke()
 async def invoke(request: ResponsesAgentRequest) -> ResponsesAgentResponse:
     mcp_servers = init_mcp_servers()
@@ -106,6 +114,7 @@ async def invoke(request: ResponsesAgentRequest) -> ResponsesAgentResponse:
                 [s.name for s in manager.active_servers])
             agent = create_agent(manager.active_servers)
             messages = normalize_history_items([i.model_dump() for i in request.input])
+            messages = await build_attachment_processor().process(messages)
             result = await Runner.run(agent, messages)
             return ResponsesAgentResponse(output=[item.to_input_item() for item in result.new_items])
     except Exception as e:
@@ -122,6 +131,7 @@ async def stream(request: dict) -> AsyncGenerator[ResponsesAgentStreamEvent, Non
             [s.name for s in manager.active_servers])
         agent = create_agent(manager.active_servers)
         messages = normalize_history_items([i.model_dump() for i in request.input])
+        messages = await build_attachment_processor().process(messages)
         result = Runner.run_streamed(agent, input=messages)
 
         async for event in process_agent_stream_events(result.stream_events()):
