@@ -62,6 +62,48 @@ def create_agent(mcp_servers: List[MCPServer]) -> Agent:
     )
 
 
+# ---------------------------------------------------------------------------
+# Monkey-patch: openai-agents SDK cannot handle reasoning tokens from
+# databricks-gpt-oss-120b. The model returns content as a list of parts
+# (reasoning + text) but the SDK expects plain strings. Patch the Pydantic
+# models BEFORE Runner.run() ever constructs them.
+# ---------------------------------------------------------------------------
+def _coerce_content_list_to_str(content_list: list) -> str:
+    """Extract plain text from a list of content parts, skipping reasoning."""
+    parts = []
+    for p in content_list:
+        if isinstance(p, str):
+            parts.append(p)
+        elif isinstance(p, dict) and p.get("type") != "reasoning":
+            t = p.get("text", p.get("delta", ""))
+            parts.append(t if isinstance(t, str) else str(t))
+    return "".join(parts)
+
+
+try:
+    from openai.types.responses import ResponseOutputText
+    _orig_rot_init = ResponseOutputText.__init__
+    def _patched_rot_init(self, /, **data):
+        if isinstance(data.get("text"), list):
+            data["text"] = _coerce_content_list_to_str(data["text"])
+        _orig_rot_init(self, **data)
+    ResponseOutputText.__init__ = _patched_rot_init
+except Exception:
+    pass
+
+try:
+    from openai.types.responses import ResponseTextDeltaEvent
+    _orig_rtde_init = ResponseTextDeltaEvent.__init__
+    def _patched_rtde_init(self, /, **data):
+        if isinstance(data.get("delta"), list):
+            data["delta"] = _coerce_content_list_to_str(data["delta"])
+        _orig_rtde_init(self, **data)
+    ResponseTextDeltaEvent.__init__ = _patched_rtde_init
+except Exception:
+    pass
+# ---------------------------------------------------------------------------
+
+
 @invoke()
 async def invoke(request: ResponsesAgentRequest) -> ResponsesAgentResponse:
     mcp_servers = init_mcp_servers()

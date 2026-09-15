@@ -37,6 +37,40 @@ def get_user_workspace_client() -> WorkspaceClient:
     return WorkspaceClient(token=token, auth_type="pat")
 
 
+def _is_reasoning_event(event_data: dict) -> bool:
+    """Check if a stream event is a reasoning/thinking event that should be filtered."""
+    item = event_data.get("item", {})
+    if isinstance(item, dict) and item.get("type") == "reasoning":
+        return True
+    if event_data.get("type", "").startswith("response.reasoning"):
+        return True
+    return False
+
+
+def _fix_stream_text(event_data: dict) -> dict:
+    """Ensure text fields in stream events are strings, not lists."""
+    if "delta" in event_data and isinstance(event_data.get("delta"), dict):
+        delta = event_data["delta"]
+        if isinstance(delta.get("text"), list):
+            text_parts = []
+            for p in delta["text"]:
+                if isinstance(p, dict):
+                    if p.get("type") == "reasoning":
+                        continue
+                    text_parts.append(p.get("text", ""))
+                elif isinstance(p, str):
+                    text_parts.append(p)
+            event_data["delta"] = {**delta, "text": "".join(text_parts)}
+    if "item" in event_data and isinstance(event_data.get("item"), dict):
+        item = event_data["item"]
+        if "content" in item and isinstance(item["content"], list):
+            item["content"] = [
+                part for part in item["content"]
+                if not (isinstance(part, dict) and part.get("type") == "reasoning")
+            ]
+    return event_data
+
+
 async def process_agent_stream_events(
     async_stream: AsyncIterator[StreamEvent],
 ) -> AsyncGenerator[ResponsesAgentStreamEvent, None]:
@@ -44,6 +78,11 @@ async def process_agent_stream_events(
     async for event in async_stream:
         if event.type == "raw_response_event":
             event_data = event.data.model_dump()
+            # Skip reasoning events
+            if _is_reasoning_event(event_data):
+                continue
+            # Fix any text fields that are lists instead of strings
+            event_data = _fix_stream_text(event_data)
             if event_data["type"] == "response.output_item.added":
                 curr_item_id = str(uuid4())
                 event_data["item"]["id"] = curr_item_id
