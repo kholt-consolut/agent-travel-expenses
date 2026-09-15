@@ -16,6 +16,7 @@ from mlflow.types.responses import (
 
 from agent_server.utils import (
     build_mcp_url,
+    coerce_content_to_text,
     get_user_workspace_client,
     process_agent_stream_events,
 )
@@ -67,25 +68,19 @@ def create_agent(mcp_servers: List[MCPServer]) -> Agent:
 # databricks-gpt-oss-120b. The model returns content as a list of parts
 # (reasoning + text) but the SDK expects plain strings. Patch the Pydantic
 # models BEFORE Runner.run() ever constructs them.
+#
+# NOTE: this only helps when the SDK builds these objects by calling
+# `Model(**data)` directly. When it validates raw dicts via `model_validate`/
+# `model_construct` instead, `__init__` is bypassed and this patch never
+# fires — that's what `process_agent_stream_events` in utils.py guards
+# against for the streaming path, using the same `coerce_content_to_text`.
 # ---------------------------------------------------------------------------
-def _coerce_content_list_to_str(content_list: list) -> str:
-    """Extract plain text from a list of content parts, skipping reasoning."""
-    parts = []
-    for p in content_list:
-        if isinstance(p, str):
-            parts.append(p)
-        elif isinstance(p, dict) and p.get("type") != "reasoning":
-            t = p.get("text", p.get("delta", ""))
-            parts.append(t if isinstance(t, str) else str(t))
-    return "".join(parts)
-
-
 try:
     from openai.types.responses import ResponseOutputText
     _orig_rot_init = ResponseOutputText.__init__
     def _patched_rot_init(self, /, **data):
         if isinstance(data.get("text"), list):
-            data["text"] = _coerce_content_list_to_str(data["text"])
+            data["text"] = coerce_content_to_text(data["text"])
         _orig_rot_init(self, **data)
     ResponseOutputText.__init__ = _patched_rot_init
 except Exception:
@@ -96,7 +91,7 @@ try:
     _orig_rtde_init = ResponseTextDeltaEvent.__init__
     def _patched_rtde_init(self, /, **data):
         if isinstance(data.get("delta"), list):
-            data["delta"] = _coerce_content_list_to_str(data["delta"])
+            data["delta"] = coerce_content_to_text(data["delta"])
         _orig_rtde_init(self, **data)
     ResponseTextDeltaEvent.__init__ = _patched_rtde_init
 except Exception:

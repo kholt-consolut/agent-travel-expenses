@@ -37,6 +37,26 @@ def get_user_workspace_client() -> WorkspaceClient:
     return WorkspaceClient(token=token, auth_type="pat")
 
 
+def coerce_content_to_text(value):
+    """Coerce a text/delta field that may be a list of content parts into a plain string.
+
+    databricks-gpt-oss-120b returns content as a list of parts (e.g.
+    ``[{"type": "reasoning", "text": "..."}, {"type": "text", "text": "..."}]``)
+    instead of a plain string. Reasoning parts are dropped; everything else is
+    concatenated. Non-list values are returned unchanged.
+    """
+    if not isinstance(value, list):
+        return value
+    parts = []
+    for p in value:
+        if isinstance(p, str):
+            parts.append(p)
+        elif isinstance(p, dict) and p.get("type") != "reasoning":
+            t = coerce_content_to_text(p.get("text", ""))
+            parts.append(t if isinstance(t, str) else str(t))
+    return "".join(parts)
+
+
 def _is_reasoning_event(event_data: dict) -> bool:
     """Check if a stream event is a reasoning/thinking event that should be filtered."""
     item = event_data.get("item", {})
@@ -48,26 +68,22 @@ def _is_reasoning_event(event_data: dict) -> bool:
 
 
 def _fix_stream_text(event_data: dict) -> dict:
-    """Ensure text fields in stream events are strings, not lists."""
-    if "delta" in event_data and isinstance(event_data.get("delta"), dict):
-        delta = event_data["delta"]
-        if isinstance(delta.get("text"), list):
-            text_parts = []
-            for p in delta["text"]:
-                if isinstance(p, dict):
-                    if p.get("type") == "reasoning":
-                        continue
-                    text_parts.append(p.get("text", ""))
-                elif isinstance(p, str):
-                    text_parts.append(p)
-            event_data["delta"] = {**delta, "text": "".join(text_parts)}
-    if "item" in event_data and isinstance(event_data.get("item"), dict):
-        item = event_data["item"]
-        if "content" in item and isinstance(item["content"], list):
-            item["content"] = [
-                part for part in item["content"]
-                if not (isinstance(part, dict) and part.get("type") == "reasoning")
-            ]
+    """Ensure text fields in stream events are strings, not content-part lists."""
+    if "delta" in event_data:
+        event_data["delta"] = coerce_content_to_text(event_data["delta"])
+    item = event_data.get("item")
+    if isinstance(item, dict):
+        if isinstance(item.get("text"), list):
+            item["text"] = coerce_content_to_text(item["text"])
+        if isinstance(item.get("content"), list):
+            new_content = []
+            for part in item["content"]:
+                if isinstance(part, dict) and part.get("type") == "reasoning":
+                    continue
+                if isinstance(part, dict) and isinstance(part.get("text"), list):
+                    part = {**part, "text": coerce_content_to_text(part["text"])}
+                new_content.append(part)
+            item["content"] = new_content
     return event_data
 
 
