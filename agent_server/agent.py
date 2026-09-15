@@ -40,20 +40,52 @@ MCP_SERVERS = [
 # END GENERATED
 
 
+import logging
+mcp_logger = logging.getLogger("mcp_debug")
+
+
 def get_mcp_user_workspace_client():
     return get_user_workspace_client()
 
 
 def init_mcp_servers():
     user_workspace_client = get_mcp_user_workspace_client()
-    return [
-        McpServer(
+    token = getattr(user_workspace_client.config, 'token', None)
+    mcp_logger.warning("MCP init: host=%s, token_present=%s, token_len=%s",
+        user_workspace_client.config.host,
+        token is not None,
+        len(token) if token else 0
+    )
+    servers = []
+    for (name, url) in MCP_SERVERS:
+        full_url = build_mcp_url(url, user_workspace_client)
+        mcp_logger.warning("MCP server: name=%s, url=%s", name, full_url)
+        srv = McpServer(
             name=name,
-            url=build_mcp_url(url, user_workspace_client),
+            url=full_url,
             workspace_client=user_workspace_client,
         )
-        for (name, url) in MCP_SERVERS
-    ]
+        mcp_logger.warning("McpServer attrs: %s", {k: str(v)[:100] for k, v in vars(srv).items()})
+        servers.append(srv)
+    return servers
+
+
+# Monkey-patch McpServer.connect() to log the actual connection error
+try:
+    _orig_mcp_connect = McpServer.connect
+    async def _patched_mcp_connect(self):
+        try:
+            mcp_logger.warning("McpServer.connect() starting for %s", getattr(self, 'name', '?'))
+            result = await _orig_mcp_connect(self)
+            mcp_logger.warning("McpServer.connect() SUCCESS for %s", getattr(self, 'name', '?'))
+            return result
+        except Exception as e:
+            mcp_logger.exception("McpServer.connect() FAILED for %s: %s: %s",
+                getattr(self, 'name', '?'), type(e).__name__, e)
+            raise
+    McpServer.connect = _patched_mcp_connect
+except Exception as e:
+    mcp_logger.warning("Could not patch McpServer: %s", e)
 
 def create_agent(mcp_servers: List[MCPServer]) -> Agent:
     return Agent(
@@ -145,17 +177,27 @@ except Exception:
 @invoke()
 async def invoke(request: ResponsesAgentRequest) -> ResponsesAgentResponse:
     mcp_servers = init_mcp_servers()
-    async with MCPServerManager(servers = mcp_servers, connect_in_parallel=True) as manager:
-        agent = create_agent(manager.active_servers)
-        messages = normalize_history_items([i.model_dump() for i in request.input])
-        result = await Runner.run(agent, messages)
-        return ResponsesAgentResponse(output=[item.to_input_item() for item in result.new_items])
+    try:
+        async with MCPServerManager(servers=mcp_servers, connect_in_parallel=True) as manager:
+            mcp_logger.warning("MCPServerManager active_servers=%d, servers=%s",
+                len(manager.active_servers),
+                [s.name for s in manager.active_servers])
+            agent = create_agent(manager.active_servers)
+            messages = normalize_history_items([i.model_dump() for i in request.input])
+            result = await Runner.run(agent, messages)
+            return ResponsesAgentResponse(output=[item.to_input_item() for item in result.new_items])
+    except Exception as e:
+        mcp_logger.exception("invoke failed: %s", e)
+        raise
 
 
 @stream()
 async def stream(request: dict) -> AsyncGenerator[ResponsesAgentStreamEvent, None]:
     mcp_servers = init_mcp_servers()
-    async with MCPServerManager(servers = mcp_servers, connect_in_parallel=True) as manager:
+    async with MCPServerManager(servers=mcp_servers, connect_in_parallel=True) as manager:
+        mcp_logger.warning("[stream] MCPServerManager active_servers=%d, servers=%s",
+            len(manager.active_servers),
+            [s.name for s in manager.active_servers])
         agent = create_agent(manager.active_servers)
         messages = normalize_history_items([i.model_dump() for i in request.input])
         result = Runner.run_streamed(agent, input=messages)
