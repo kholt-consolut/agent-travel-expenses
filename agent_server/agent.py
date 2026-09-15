@@ -14,6 +14,7 @@ from mlflow.types.responses import (
     ResponsesAgentStreamEvent,
 )
 
+from agent_server.history import normalize_history_items
 from agent_server.utils import (
     build_mcp_url,
     coerce_content_to_text,
@@ -146,7 +147,7 @@ async def invoke(request: ResponsesAgentRequest) -> ResponsesAgentResponse:
     mcp_servers = init_mcp_servers()
     async with MCPServerManager(servers = mcp_servers, connect_in_parallel=True) as manager:
         agent = create_agent(manager.active_servers)
-        messages = [i.model_dump() for i in request.input]
+        messages = normalize_history_items([i.model_dump() for i in request.input])
         result = await Runner.run(agent, messages)
         return ResponsesAgentResponse(output=[item.to_input_item() for item in result.new_items])
 
@@ -156,7 +157,7 @@ async def stream(request: dict) -> AsyncGenerator[ResponsesAgentStreamEvent, Non
     mcp_servers = init_mcp_servers()
     async with MCPServerManager(servers = mcp_servers, connect_in_parallel=True) as manager:
         agent = create_agent(manager.active_servers)
-        messages = [i.model_dump() for i in request.input]
+        messages = normalize_history_items([i.model_dump() for i in request.input])
         result = Runner.run_streamed(agent, input=messages)
 
         async for event in process_agent_stream_events(result.stream_events()):
