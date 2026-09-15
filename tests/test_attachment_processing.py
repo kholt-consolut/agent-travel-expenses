@@ -5,6 +5,9 @@ non-attachment content is left untouched."""
 
 import asyncio
 import base64
+from unittest.mock import patch
+
+import httpx
 
 from agent_server.attachment_processing import AttachmentProcessor
 from agent_server.document_extraction import PdfExtractionResult
@@ -120,3 +123,53 @@ def test_multiple_pdfs_are_processed_concurrently_and_independently():
     assert filenames_uploaded == {"a.pdf", "b.pdf"}
     assert len(result[0]["content"]) == 2
     assert all(part["type"] == "input_text" for part in result[0]["content"])
+
+
+def test_file_url_as_data_uri_is_decoded_without_network():
+    extractor = _FakeExtractor(PdfExtractionResult(text="from file_url", page_count=1))
+    uploader = _FakeUploader()
+    processor = AttachmentProcessor(extractor, uploader)
+
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "input_file", "filename": "receipt.pdf", "file_url": _data_uri(b"pdf-bytes")}],
+        }
+    ]
+
+    result = asyncio.run(processor.process(messages))
+
+    assert "from file_url" in result[0]["content"][0]["text"]
+    assert extractor.calls == [b"pdf-bytes"]
+    assert uploader.calls == [("receipt.pdf", b"pdf-bytes")]
+
+
+def test_file_url_as_http_url_is_fetched():
+    extractor = _FakeExtractor(PdfExtractionResult(text="fetched text", page_count=1))
+    uploader = _FakeUploader()
+    processor = AttachmentProcessor(extractor, uploader)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://example.com/storage/receipt.pdf"
+        return httpx.Response(200, content=b"fetched-pdf-bytes")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_file",
+                    "filename": "receipt.pdf",
+                    "file_url": "https://example.com/storage/receipt.pdf",
+                }
+            ],
+        }
+    ]
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = asyncio.run(processor.process(messages))
+
+    assert "fetched text" in result[0]["content"][0]["text"]
+    assert extractor.calls == [b"fetched-pdf-bytes"]
+    assert uploader.calls == [("receipt.pdf", b"fetched-pdf-bytes")]

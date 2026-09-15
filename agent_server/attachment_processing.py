@@ -4,27 +4,47 @@ document_extraction.py and sap_file_upload.py.
 
 Only PDF `input_file` content parts (OpenAI Responses API input shape,
 https://platform.openai.com/docs/api-reference/responses/create) are
-handled; anything else (other file types, or `file_id`/`file_url` instead
-of `file_data`) is left untouched for now.
+handled; anything else (other file types, or `file_id`) is left untouched
+for now.
+
+The content can arrive either way the spec allows: `file_data` (a
+`data:<mime>;base64,<data>` URI, or raw base64) or `file_url` (normally a
+fetchable http(s) URL, but some clients also put a data URI there) - which
+one actually shows up depends on how the frontend's upload route and the
+Vercel AI SDK's message conversion pass the file along, so both are
+handled rather than assumed.
 """
 
 import asyncio
 import base64
 
+import httpx
+
 from agent_server.document_extraction import PdfExtractionResult, PdfTextExtractor
 from agent_server.sap_file_upload import SapFileUploader
 
 
-def _decode_file_data(file_data: str) -> bytes:
-    """`file_data` is a data URI (`data:<mime>;base64,<data>`) per the
-    OpenAI Responses API spec; fall back to treating it as raw base64."""
-    if file_data.startswith("data:") and ";base64," in file_data:
-        file_data = file_data.split(";base64,", 1)[1]
-    return base64.b64decode(file_data)
+def _decode_data_uri_or_base64(value: str) -> bytes:
+    if value.startswith("data:") and ";base64," in value:
+        value = value.split(";base64,", 1)[1]
+    return base64.b64decode(value)
+
+
+async def _resolve_file_bytes(part: dict) -> bytes:
+    if file_data := part.get("file_data"):
+        return _decode_data_uri_or_base64(file_data)
+
+    file_url = part["file_url"]
+    if file_url.startswith("data:"):
+        return _decode_data_uri_or_base64(file_url)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(file_url)
+        response.raise_for_status()
+        return response.content
 
 
 def _is_pdf_part(part: dict) -> bool:
-    if part.get("type") != "input_file" or not part.get("file_data"):
+    if part.get("type") != "input_file" or not (part.get("file_data") or part.get("file_url")):
         return False
     return part.get("filename", "").lower().endswith(".pdf")
 
@@ -66,7 +86,7 @@ class AttachmentProcessor:
 
     async def _process_one(self, part: dict) -> dict:
         filename = part["filename"]
-        content = _decode_file_data(part["file_data"])
+        content = await _resolve_file_bytes(part)
 
         extraction, _ = await asyncio.gather(
             asyncio.to_thread(self._pdf_extractor.extract, content),
