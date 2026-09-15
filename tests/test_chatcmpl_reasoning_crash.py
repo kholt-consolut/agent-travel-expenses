@@ -16,11 +16,12 @@ whole stream generator immediately -- no further text for that turn ever
 reaches the UI, which is what rendered as an empty bubble in production
 (see the traceback this test's "before fix" case reproduces).
 
-agent_server.agent patches ``ChatCmplStreamHandler.handle_stream`` to coerce
-every chunk's ``delta.content``/``reasoning_content``/``reasoning`` to plain
-text before the SDK's own handler ever sees them. This test proves the crash
-exists without that patch and that the patch fixes it, using a raw chunk
-stream built with ``model_construct()`` the same way the SDK builds it in
+``GptOssReasoningCompat.apply()`` (agent_server/gpt_oss_compat.py) patches
+``ChatCmplStreamHandler.handle_stream`` to coerce every chunk's
+``delta.content``/``reasoning_content``/``reasoning`` to plain text before
+the SDK's own handler ever sees them. This test proves the crash exists
+without that patch and that the patch fixes it, using a raw chunk stream
+built with ``model_construct()`` the same way the SDK builds it in
 production.
 """
 
@@ -30,7 +31,7 @@ import pytest
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk, Choice, ChoiceDelta
 from openai.types.responses import Response
 
-from agent_server.utils import coerce_content_to_text
+from agent_server.gpt_oss_compat import GptOssReasoningCompat
 
 
 def _make_chunk(content):
@@ -96,28 +97,12 @@ def test_raw_sdk_crashes_on_list_content():
 def test_patched_handle_stream_does_not_crash_and_reconstructs_text():
     from agents.models.chatcmpl_stream_handler import ChatCmplStreamHandler
 
-    orig_handle_stream = ChatCmplStreamHandler.handle_stream
-
-    async def coerce_chunks(stream):
-        async for chunk in stream:
-            for choice in getattr(chunk, "choices", None) or []:
-                delta = getattr(choice, "delta", None)
-                if delta is None:
-                    continue
-                for field in ("content", "reasoning_content", "reasoning"):
-                    value = getattr(delta, field, None)
-                    if isinstance(value, list):
-                        setattr(delta, field, coerce_content_to_text(value))
-            yield chunk
-
-    orig_func = orig_handle_stream.__func__
-
-    async def patched_handle_stream(cls, response, stream, *args, **kwargs):
-        async for event in orig_func(cls, response, coerce_chunks(stream), *args, **kwargs):
-            yield event
-
-    ChatCmplStreamHandler.handle_stream = classmethod(patched_handle_stream)
+    unpatched_handle_stream = ChatCmplStreamHandler.handle_stream
+    was_applied = GptOssReasoningCompat._applied
     try:
+        GptOssReasoningCompat._applied = False  # force a fresh apply for this test
+        GptOssReasoningCompat.apply()
+
         async def run():
             deltas = []
             async for event in ChatCmplStreamHandler.handle_stream(_fake_response(), _fake_gpt_oss_raw_stream()):
@@ -128,4 +113,5 @@ def test_patched_handle_stream_does_not_crash_and_reconstructs_text():
         deltas = asyncio.run(run())
         assert "".join(deltas) == "Hallo, wie kann ich helfen?"
     finally:
-        ChatCmplStreamHandler.handle_stream = orig_handle_stream
+        ChatCmplStreamHandler.handle_stream = unpatched_handle_stream
+        GptOssReasoningCompat._applied = was_applied
